@@ -1,0 +1,575 @@
+openapi: 3.1.0
+info:
+  title: strata-api
+  version: 1.0.0
+  description: >
+    Production-grade modular Node/Express/TypeScript API. Every response uses a
+    consistent envelope: success responses are `{ success: true, data, meta }`
+    and error responses are `{ success: false, error }`. List endpoints use
+    opaque cursor (keyset) pagination via `limit`/`cursor` query params and a
+    `meta.pagination` block.
+  license:
+    name: MIT
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+tags:
+  - name: health
+    description: Operational liveness and readiness probes (unversioned).
+  - name: auth
+    description: Registration, login, refresh-token rotation, and logout.
+  - name: users
+    description: User retrieval and administration.
+
+paths:
+  /health/live:
+    get:
+      tags: [health]
+      summary: Liveness probe
+      description: Returns 200 if the process is up. No dependencies are checked.
+      security: []
+      responses:
+        '200':
+          description: Process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    const: true
+                  data:
+                    type: object
+                    properties:
+                      status:
+                        type: string
+                        const: ok
+                    required: [status]
+                required: [success, data]
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Readiness probe
+      description: >
+        Checks Postgres (`SELECT 1`) and Redis (`PING`). Returns 200 only when
+        both are up; otherwise 503 with a per-dependency breakdown.
+      security: []
+      responses:
+        '200':
+          description: Ready to serve traffic.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+        '503':
+          description: Degraded - one or more dependencies are down.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyResponse'
+
+  /api/v1/auth/register:
+    post:
+      tags: [auth]
+      summary: Register a new user
+      description: Creates a user and returns the public user plus an access/refresh token pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterInput'
+      responses:
+        '201':
+          description: User created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AuthResult'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Log in
+      description: Verifies credentials and returns the public user plus a new access/refresh token pair.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginInput'
+      responses:
+        '200':
+          description: Authenticated.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AuthResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Rotate tokens
+      description: >
+        Exchanges a valid refresh token for a new access/refresh pair. The
+        presented refresh token is revoked (rotation).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshInput'
+      responses:
+        '200':
+          description: New token pair issued.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TokenPair'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Log out
+      description: >
+        Revokes the given refresh token. Always succeeds from the client's
+        perspective, even if the token was already invalid.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshInput'
+      responses:
+        '204':
+          description: Logged out (no content).
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/users:
+    get:
+      tags: [users]
+      summary: List users (ADMIN)
+      description: Cursor-paginated list of users. Requires the ADMIN role.
+      parameters:
+        - $ref: '#/components/parameters/LimitParam'
+        - $ref: '#/components/parameters/CursorParam'
+      responses:
+        '200':
+          description: A page of users.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedUsers'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/users/me:
+    get:
+      tags: [users]
+      summary: Get the authenticated user
+      description: Returns the public profile of the currently authenticated user.
+      responses:
+        '200':
+          description: The current user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /api/v1/users/{id}:
+    parameters:
+      - $ref: '#/components/parameters/UserIdParam'
+    get:
+      tags: [users]
+      summary: Get a user by id
+      responses:
+        '200':
+          description: The requested user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    patch:
+      tags: [users]
+      summary: Update a user (ADMIN)
+      description: Update a user's name and/or role. Requires the ADMIN role.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserInput'
+      responses:
+        '200':
+          description: The updated user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      tags: [users]
+      summary: Delete a user (ADMIN)
+      description: Permanently delete a user. Requires the ADMIN role.
+      responses:
+        '204':
+          description: Deleted (no content).
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Bearer access token obtained from /api/v1/auth/login or /register.
+
+  parameters:
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      description: Page size (1–100).
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    CursorParam:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque base64url cursor from a previous response's meta.pagination.nextCursor.
+      schema:
+        type: string
+    UserIdParam:
+      name: id
+      in: path
+      required: true
+      description: User id (UUID).
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    ApiMeta:
+      type: object
+      properties:
+        requestId:
+          type: string
+          description: Correlation id, echoed in the x-request-id header.
+      required: [requestId]
+      additionalProperties: true
+
+    PaginationMeta:
+      type: object
+      properties:
+        nextCursor:
+          type: [string, 'null']
+          description: Pass back as ?cursor= to fetch the next page; null when no more.
+        hasMore:
+          type: boolean
+        limit:
+          type: integer
+      required: [nextCursor, hasMore, limit]
+
+    SuccessEnvelope:
+      type: object
+      description: Standard success envelope. `data` is refined per endpoint.
+      properties:
+        success:
+          type: boolean
+          const: true
+        data: {}
+        meta:
+          $ref: '#/components/schemas/ApiMeta'
+      required: [success, data, meta]
+
+    ErrorEnvelope:
+      type: object
+      description: Standard error envelope.
+      properties:
+        success:
+          type: boolean
+          const: false
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              description: Stable, machine-readable error code.
+            message:
+              type: string
+            details:
+              description: Optional structured detail (e.g. Zod field errors).
+            requestId:
+              type: string
+          required: [code, message, requestId]
+      required: [success, error]
+
+    PublicUser:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: [string, 'null']
+        role:
+          $ref: '#/components/schemas/UserRole'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      required: [id, email, name, role, createdAt, updatedAt]
+
+    UserRole:
+      type: string
+      enum: [USER, ADMIN]
+
+    AuthResult:
+      type: object
+      properties:
+        user:
+          $ref: '#/components/schemas/PublicUser'
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+      required: [user, accessToken, refreshToken]
+
+    TokenPair:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+      required: [accessToken, refreshToken]
+
+    RegisterInput:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+          maxLength: 128
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+      required: [email, password]
+
+    LoginInput:
+      type: object
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 1
+      required: [email, password]
+
+    RefreshInput:
+      type: object
+      properties:
+        refreshToken:
+          type: string
+          minLength: 10
+      required: [refreshToken]
+
+    UpdateUserInput:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        role:
+          $ref: '#/components/schemas/UserRole'
+
+    UserResponse:
+      allOf:
+        - $ref: '#/components/schemas/SuccessEnvelope'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/PublicUser'
+
+    PaginatedUsers:
+      type: object
+      properties:
+        success:
+          type: boolean
+          const: true
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/PublicUser'
+        meta:
+          allOf:
+            - $ref: '#/components/schemas/ApiMeta'
+            - type: object
+              properties:
+                pagination:
+                  $ref: '#/components/schemas/PaginationMeta'
+              required: [pagination]
+      required: [success, data, meta]
+
+    ReadyResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            status:
+              type: string
+              enum: [ready, degraded]
+            checks:
+              type: object
+              properties:
+                database:
+                  type: string
+                  enum: [up, down]
+                redis:
+                  type: string
+                  enum: [up, down]
+              required: [database, redis]
+          required: [status, checks]
+      required: [success, data]
+
+  responses:
+    Unauthorized:
+      description: Missing/invalid credentials or token (UNAUTHORIZED).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Forbidden:
+      description: Authenticated but lacks the required role (FORBIDDEN).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: Resource not found (NOT_FOUND).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Conflict:
+      description: Uniqueness/state conflict, e.g. email already registered (CONFLICT).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    ValidationError:
+      description: Request failed schema validation (VALIDATION_ERROR).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    RateLimited:
+      description: Rate limit exceeded (RATE_LIMITED). See the Retry-After header.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+
+security:
+  - bearerAuth: []
