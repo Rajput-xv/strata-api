@@ -27,7 +27,7 @@ And the unglamorous things you'd otherwise wire up at 2 a.m. are already in plac
 - **Background jobs via BullMQ** - offload slow work (e.g. email) to a separate worker process.
 - **Idempotency keys** - safe retries for `POST`/`PATCH` via the `Idempotency-Key` header.
 - **Operational endpoints** - `/health/live` (liveness) and `/health/ready` (readiness: Postgres + Redis).
-- **Interactive docs** - OpenAPI 3.1 served at `/docs`.
+- **Interactive docs** - OpenAPI 3.1 at `/docs`, tuned as a test console: the auth token persists across reloads, endpoints are filterable, and each call shows its response time.
 - **Graceful shutdown** - drains the HTTP server, closes queues, disconnects Redis and Prisma.
 
 ## Tech stack
@@ -54,13 +54,15 @@ git clone <your-repo-url> strata-api
 cd strata-api
 npm i
 
-# 2. Configure environment
-cp .env.example .env
+# 2. Create your .env  (the required keys are listed in docs/GETTING-STARTED.md)
+#    dev + worker load it automatically via --env-file; Prisma reads it too.
 
 # 3. Start Postgres + Redis
+#    Postgres is published on host :5433 so it won't collide with a
+#    local Postgres already sitting on :5432.
 docker compose up -d
 
-# 4. Apply the database schema
+# 4. Apply the database schema (creates the User + RefreshToken tables)
 npm run prisma:migrate
 
 # 5. Run the API (and, in a second terminal, the worker)
@@ -74,7 +76,7 @@ The API listens on `http://localhost:3000`. Interactive docs are at `http://loca
 
 | Script                    | What it does                                          |
 | ------------------------- | ----------------------------------------------------- |
-| `npm run dev`             | Run the API in watch mode (`tsx watch src/server.ts`) |
+| `npm run dev`             | Run the API in watch mode, loading `.env` (`tsx watch --env-file`) |
 | `npm run worker`          | Run the BullMQ worker in watch mode                   |
 | `npm run build`           | Compile with `tsc` then rewrite paths via `tsc-alias` |
 | `npm start`               | Run the compiled API (`node dist/server.js`)          |
@@ -84,10 +86,21 @@ The API listens on `http://localhost:3000`. Interactive docs are at `http://loca
 | `npm run format`          | Format with Prettier                                  |
 | `npm test`                | Run the test suite once (`vitest run`)                |
 | `npm run test:watch`      | Run tests in watch mode                               |
+| `npm run test:coverage`   | Run tests once and write a V8 coverage report to `coverage/` |
 | `npm run prisma:generate` | Generate the Prisma client                            |
 | `npm run prisma:migrate`  | Create/apply a dev migration                          |
 | `npm run prisma:deploy`   | Apply migrations in production                        |
 | `npm run prisma:studio`   | Open Prisma Studio                                    |
+
+## Testing
+
+`npm test` runs the whole suite - **unit, middleware, and HTTP-integration layers** - in a few seconds, with **no Postgres or Redis required**. The two external boundaries (Prisma, Redis) are mocked at the module seam, so runs are deterministic and CI-safe; everything else exercises the real thing - the integration layer drives the actual Express app through supertest with genuine JWT signing, bcrypt hashing, and the full middleware chain.
+
+- **`tests/unit/`** - pure logic: jwt, password, cursors, Zod schemas, the auth/users services, the cache helper.
+- **`tests/middleware/`** - each middleware on its own: auth, validation, the rate limiter's in-memory fallback, error→envelope mapping, idempotent replay.
+- **`tests/integration/`** - register → login → refresh → logout and the users CRUD flow, including role guards, the 404 envelope, and security headers.
+
+`npm run test:coverage` writes a V8 report to `coverage/` (lines sit around 97%).
 
 ## Project layout
 
@@ -118,7 +131,7 @@ The API listens on `http://localhost:3000`. Interactive docs are at `http://loca
 │   ├── app.ts                   # Express app assembly
 │   ├── server.ts                # HTTP server + graceful shutdown
 │   └── worker.ts                # BullMQ worker process entrypoint
-├── tests/                       # vitest unit tests
+├── tests/                       # unit · middleware · integration (supertest) + helpers
 ├── docs/                        # the documents linked below
 ├── docker-compose.yml           # postgres + redis
 └── Dockerfile                   # multi-stage build + runtime image
